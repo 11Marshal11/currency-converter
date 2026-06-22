@@ -24,3 +24,26 @@
 
 ```bash
 git clone https://github.com/danilbelovodsky-bot/currency-converter.git
+```
+
+2.Перейти в папку проекта:
+```
+cd currency-converter
+```
+
+3. Запустить файл:
+```
+python ConverterEngine.py
+```
+Основные классы:
+###ExchangeRateBoard
+Хранит курсы валют и позволяет получить курс по коду валюты.
+
+###HistoryManager
+Хранит историю операций конвертации.
+
+###Transaction
+Описывает одну операцию конвертации.
+
+###ConverterEngine
+Выполняет саму конвертацию валют и добавляет запись в историю.
