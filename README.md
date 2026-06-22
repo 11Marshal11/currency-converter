@@ -36,6 +36,7 @@ cd currency-converter
 python ConverterEngine.py
 ```
 Основные классы:
+
 ###ExchangeRateBoard
 Хранит курсы валют и позволяет получить курс по коду валюты.
 
