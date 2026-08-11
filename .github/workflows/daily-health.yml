@@ -1,0 +1,154 @@
+name: Daily currency converter health
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "ConverterEngine.py"
+      - ".github/workflows/daily-health.yml"
+  schedule:
+    - cron: "27 19 * * *"
+      timezone: "Europe/Berlin"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daily-currency-health-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  health:
+    name: Python quality and domain smoke tests
+    runs-on: ubuntu-latest
+    outputs:
+      report: ${{ steps.report.outputs.content }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+
+      - name: Install Ruff
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ruff==0.12.5
+
+      - name: Run critical Ruff checks
+        shell: bash
+        run: |
+          set -o pipefail
+          ruff check ConverterEngine.py --select E9,F63,F7,F82 2>&1 | tee /tmp/currency-ruff.log
+
+      - name: Compile Python source
+        run: python -m py_compile ConverterEngine.py
+
+      - name: Run domain smoke tests
+        shell: bash
+        run: |
+          python - <<'PY' | tee /tmp/currency-smoke.log
+          import ast
+          from pathlib import Path
+
+          source_path = Path("ConverterEngine.py")
+          tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+          tree.body = [
+              node
+              for node in tree.body
+              if not (
+                  isinstance(node, ast.Expr)
+                  and isinstance(node.value, ast.Call)
+                  and isinstance(node.value.func, ast.Name)
+                  and node.value.func.id == "run"
+              )
+          ]
+          namespace = {"__name__": "daily_health"}
+          exec(compile(tree, str(source_path), "exec"), namespace)
+
+          board = namespace["ExchangeRateBoard"]({"USD": 85, "RUB": 1})
+          history = namespace["HistoryManager"]()
+          engine = namespace["ConverterEngine"](board, history, 0.0015)
+          transaction = engine.convert(100, "USD", "RUB")
+
+          assert transaction.result == 8500
+          assert transaction.fee == 12.75
+          assert history.get_all() == [transaction]
+
+          try:
+              board.get_rate("GBP")
+          except ValueError:
+              pass
+          else:
+              raise AssertionError("Unknown currency must raise ValueError")
+
+          copied_history = history.get_all()
+          copied_history.clear()
+          assert history.get_all() == [transaction]
+
+          print("3 domain smoke checks passed")
+          PY
+
+      - name: Build health report
+        id: report
+        shell: bash
+        run: |
+          RUN_AT="$(TZ=Europe/Berlin date '+%Y-%m-%d %H:%M:%S %Z')"
+          SOURCE_HASH="$(sha256sum ConverterEngine.py | awk '{print $1}')"
+          LINES="$(wc -l < ConverterEngine.py | tr -d ' ')"
+          CLASSES="$(grep -c '^class ' ConverterEngine.py || true)"
+          FUNCTIONS="$(grep -c '^[[:space:]]*def ' ConverterEngine.py || true)"
+          SMOKE_SUMMARY="$(tail -1 /tmp/currency-smoke.log)"
+          mkdir -p reports
+          cat > reports/daily-health.md <<EOF
+          # Currency converter daily health
+
+          Generated: $RUN_AT
+
+          Commit checked: \`$GITHUB_SHA\`
+
+          - Critical Ruff checks: passed
+          - Python compilation: passed
+          - Domain smoke tests: $SMOKE_SUMMARY
+          - Source metrics: $LINES lines, $CLASSES classes, $FUNCTIONS functions/methods
+          - Source SHA-256: \`$SOURCE_HASH\`
+          - Workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+          EOF
+          echo "content=$(base64 -w0 reports/daily-health.md)" >> "$GITHUB_OUTPUT"
+
+  publish:
+    name: Publish report to main
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: health
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v7
+        with:
+          ref: main
+
+      - name: Restore report
+        shell: bash
+        run: |
+          mkdir -p reports
+          printf '%s' '${{ needs.health.outputs.report }}' | base64 --decode > reports/daily-health.md
+
+      - name: Commit report
+        shell: bash
+        run: |
+          if [ -z "$(git status --porcelain -- reports/daily-health.md)" ]; then
+            echo "Report is already current"
+            exit 0
+          fi
+          git config user.name "11Marshal11"
+          git config user.email "236251269+11Marshal11@users.noreply.github.com"
+          git add reports/daily-health.md
+          DAY="$(TZ=Europe/Berlin date '+%Y-%m-%d')"
+          git commit -m "chore: update currency health report ($DAY)"
+          git pull --rebase origin main
+          git push origin HEAD:main
